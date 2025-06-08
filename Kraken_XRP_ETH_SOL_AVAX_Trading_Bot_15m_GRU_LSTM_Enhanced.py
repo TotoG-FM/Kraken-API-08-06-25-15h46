@@ -563,7 +563,6 @@ def prepare_last_sequence(returns, volume, volatility, momentum, volume_anomaly)
                                       momentum[-TREND_LOOKBACK:], volume_anomaly[-TREND_LOOKBACK:]))], dtype=np.float32)
 
 
-@tf.function  # Entraînement sans XLA
 def train_model(model, X, y):
     # Détecter et choisir device (Metal GPU ou fallback CPU)
     device = "/GPU:0" if tf.config.list_physical_devices('GPU') else "/CPU:0"
@@ -649,7 +648,6 @@ def predict_price_trend(data, symbol):
         live_df['Volume_Anomaly'].values
     )
 
-    @tf.function
     def predict_batch():
         return model.predict(last_sequence, verbose=0)
 
@@ -670,7 +668,6 @@ def predict_exit(data, symbol):
                                           live_df['Volatility'].values, live_df['Momentum'].values,
                                           live_df['Volume_Anomaly'].values)
 
-    @tf.function  # Prédiction sans XLA
     def predict_batch():
         return gru_models[f'{symbol}_15min'].predict(last_sequence, verbose=0)
 
