@@ -841,6 +841,127 @@ def place_sell_order(symbol, quantity, precision, price, positions, entry_price)
     return {'executedQty': executed_qty}, positions[symbol]
 
 
+# Déterminer si un trade doit être initié
+def should_enter_trade(symbol, df, trend, confidence, current_price):
+    pair = next(p for p in CONFIG['pairs'] if p['symbol'] == symbol)
+    if trend <= 0 or confidence <= 0.5:
+        return False
+    rsi = calculate_rsi(df)
+    mu, sigma = calculate_mu_sigma(df, symbol)
+    price_paths = monte_carlo_sim(current_price, mu, sigma, T, N, DT, M)
+    median_price = np.median(price_paths[-1])
+    return (
+        rsi < pair['rsi_oversold']
+        and current_price < median_price * (1 + PRICE_THRESHOLD)
+    )
+
+
+# Calcul de la taille de position à acheter
+def compute_position_size(pair, current_price, confidence):
+    if current_price <= 0:
+        return 0
+    budget = float(pair.get('budget', 0)) * float(confidence)
+    quantity = budget / current_price
+    if quantity * current_price < MIN_NOTIONAL:
+        return 0
+    precision = pair.get('quantity_precision', 4)
+    return round(quantity, precision)
+
+
+# Mettre à jour après un achat
+def update_after_buy(order, symbol, position, price, positions,
+                     average_entry_prices, trading_history, portfolio_manager):
+    qty = float(order.get('executedQty', 0))
+    prev_qty = position - qty
+    if position > 0:
+        average_entry_prices[symbol] = (
+            average_entry_prices[symbol] * prev_qty + price * qty
+        ) / position
+    else:
+        average_entry_prices[symbol] = price
+    trading_history.append({'symbol': symbol, 'action': 'buy',
+                            'quantity': qty, 'price': price})
+    portfolio_manager.update_positions(symbol, qty)
+
+
+# Déterminer si une position doit être clôturée
+def should_exit_trade(symbol, df, current_price, entry_price):
+    if entry_price <= 0:
+        return False
+    pair = next(p for p in CONFIG['pairs'] if p['symbol'] == symbol)
+    rsi = calculate_rsi(df)
+    exit_signal = (
+        current_price >= entry_price * (1 + pair['take_profit'])
+        or current_price <= entry_price * (1 + pair['stop_loss'])
+        or rsi > RSI_OVERBOUGHT
+        or predict_exit(df, symbol)
+    )
+    trailing_stop_price = calculate_trailing_stop(current_price, highest_prices[symbol])
+    return exit_signal or current_price <= trailing_stop_price
+
+
+# Mettre à jour après une vente
+def update_after_sell(order, symbol, price, average_entry_prices,
+                      positions, trading_history, portfolio_manager):
+    qty = float(order.get('executedQty', 0))
+    entry_price = average_entry_prices[symbol]
+    if entry_price > 0:
+        raw_profit_pct = (price - entry_price) / entry_price
+        profit_pct = raw_profit_pct - (2 * SLIPPAGE_RATE + 2 * TRADING_FEE)
+    else:
+        profit_pct = 0.0
+    trading_history.append({'symbol': symbol, 'action': 'sell',
+                            'quantity': qty, 'price': price,
+                            'profit': profit_pct})
+    if positions[symbol] <= 0:
+        average_entry_prices[symbol] = 0
+    portfolio_manager.capital += qty * price * (1 - TRADING_FEE - SLIPPAGE_RATE)
+
+
+# Vérifier le drawdown et alerter si nécessaire
+def check_drawdown(drawdown):
+    if drawdown <= DRAWDOWN_LIMIT:
+        logger.error(f"Limite de drawdown atteinte : {drawdown:.2%}")
+    elif drawdown <= DRAWDOWN_WARNING:
+        logger.warning(f"Alerte drawdown : {drawdown:.2%}")
+
+
+# Générer un rapport régulier sur la progression
+def generate_progress_report(trading_history, historical_dfs):
+    try:
+        with open(CONFIG['data_log_file'], 'a', newline='') as f:
+            writer = csv.writer(f)
+            total_budget = sum(float(p['budget']) for p in CONFIG['pairs'])
+            for symbol, df in historical_dfs.items():
+                if df.empty:
+                    continue
+                last_price = df['price'].iloc[-1]
+                volume = df['Volume'].iloc[-1]
+                volatility = df['Volatility'].iloc[-1]
+                returns = df['Returns'].dropna()
+                monthly_return = returns.tail(720).sum()
+                sharpe_ratio = (
+                    np.mean(returns) / (np.std(returns) if np.std(returns) else 1e-8)
+                ) * np.sqrt(8760)
+                drawdowns = (
+                    np.maximum.accumulate(df['price']) - df['price']
+                ) / np.maximum.accumulate(df['price'])
+                max_drawdown = drawdowns.max() if len(drawdowns) else 0
+                success_rate = np.mean([
+                    t.get('profit', 0) > 0 for t in trading_history if t['symbol'] == symbol
+                ]) if trading_history else 0
+                losing_trades = sum(
+                    1 for t in trading_history if t['symbol'] == symbol and t.get('profit', 0) <= 0
+                )
+                writer.writerow([
+                    datetime.now(), symbol, last_price, volume, volatility,
+                    success_rate, monthly_return, sharpe_ratio, max_drawdown,
+                    total_budget, losing_trades
+                ])
+    except Exception as e:
+        logger.error(f"Erreur génération rapport : {e}")
+
+
 
 # Ajuster les paramètres
 def adjust_parameters(symbol, trading_history):
