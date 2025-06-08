@@ -15,6 +15,7 @@ import pandas as pd
 import time
 from datetime import datetime, timedelta
 import csv
+import json
 import tensorflow as tf
 from numba import jit
 import asyncio
@@ -158,6 +159,115 @@ if not os.path.exists(CONFIG['data_log_file']):
         writer.writerow(['timestamp', 'symbol', 'last_price', 'volume', 'volatility', 'success_rate', 'monthly_return',
                          'sharpe_ratio', 'max_drawdown', 'total_budget', 'losing_trades'])
     logger.info(f"Fichier {CONFIG['data_log_file']} créé.")
+
+# --- Gestion des positions et journal des trades ---
+POSITIONS_JSON = "positions.json"
+TRADES_LOG_JSON = "trades_log.json"
+
+if not os.path.exists(POSITIONS_JSON):
+    with open(POSITIONS_JSON, 'w') as f:
+        json.dump({pair['symbol']: "flat" for pair in CONFIG['pairs']}, f, indent=2)
+
+if not os.path.exists(TRADES_LOG_JSON):
+    with open(TRADES_LOG_JSON, 'w') as f:
+        json.dump([], f, indent=2)
+
+def load_positions_state():
+    try:
+        with open(POSITIONS_JSON, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {pair['symbol']: "flat" for pair in CONFIG['pairs']}
+
+def save_positions_state(state):
+    with open(POSITIONS_JSON, 'w') as f:
+        json.dump(state, f, indent=2)
+
+def log_trade(symbol, action, price, confidence):
+    trade = {
+        "symbol": symbol,
+        "action": action,
+        "price": price,
+        "confidence": confidence,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    try:
+        logs = []
+        if os.path.exists(TRADES_LOG_JSON):
+            with open(TRADES_LOG_JSON, 'r') as f:
+                logs = json.load(f)
+        logs.append(trade)
+        with open(TRADES_LOG_JSON, 'w') as f:
+            json.dump(logs, f, indent=2)
+    except Exception as e:
+        logger.error(f"Erreur lors de l'enregistrement du trade: {e}")
+
+def execute_buy(symbol, price, confidence):
+    logger.info(f"[SIMUL] BUY {symbol} @ {price:.4f} (conf={confidence:.2f})")
+    log_trade(symbol, "buy", price, confidence)
+
+def execute_sell(symbol, price, confidence):
+    logger.info(f"[SIMUL] SELL {symbol} @ {price:.4f} (conf={confidence:.2f})")
+    log_trade(symbol, "sell", price, confidence)
+
+def execute_short(symbol, price, confidence):
+    logger.info(f"[SIMUL] SHORT {symbol} @ {price:.4f} (conf={confidence:.2f})")
+    log_trade(symbol, "short", price, confidence)
+
+def close_short(symbol, price, confidence):
+    logger.info(f"[SIMUL] CLOSE SHORT {symbol} @ {price:.4f} (conf={confidence:.2f})")
+    log_trade(symbol, "close_short", price, confidence)
+
+def process_signal(symbol, trend, confidence, price, positions_state):
+    if confidence < 0.6:
+        return
+    state = positions_state.get(symbol, "flat")
+    if trend == "up" and state == "flat":
+        execute_buy(symbol, price, confidence)
+        positions_state[symbol] = "long"
+    elif trend == "down" and state == "long":
+        execute_sell(symbol, price, confidence)
+        positions_state[symbol] = "flat"
+    elif trend == "down" and state == "flat":
+        execute_short(symbol, price, confidence)
+        positions_state[symbol] = "short"
+    elif trend == "up" and state == "short":
+        close_short(symbol, price, confidence)
+        positions_state[symbol] = "flat"
+    save_positions_state(positions_state)
+
+def run_backtest(df, model):
+    balance = 10000.0
+    state = "flat"
+    entry = 0.0
+    for i in range(len(df)):
+        price = float(df.iloc[i]['price'])
+        trend, conf = model.predict(df.iloc[: i + 1]) if hasattr(model, 'predict') else (0, 0)
+        if isinstance(trend, (list, np.ndarray)):
+            trend = trend[0]
+        if conf < 0.6:
+            continue
+        if trend in ("up", 1):
+            if state == "flat":
+                entry = price
+                state = "long"
+            elif state == "short":
+                balance += entry - price
+                state = "flat"
+        elif trend in ("down", -1):
+            if state == "long":
+                balance += price - entry
+                state = "flat"
+            elif state == "flat":
+                entry = price
+                state = "short"
+    final_price = float(df.iloc[-1]['price'])
+    if state == "long":
+        balance += final_price - entry
+    elif state == "short":
+        balance += entry - final_price
+    print(f"Solde final du backtest: ${balance:.2f}")
+    return balance
 
 
 # Versions des packages
