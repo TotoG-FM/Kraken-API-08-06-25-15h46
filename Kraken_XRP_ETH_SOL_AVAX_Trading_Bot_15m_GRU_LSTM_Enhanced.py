@@ -946,7 +946,12 @@ async def trading_bot():
     hmm_models = {p['symbol']: train_hmm(historical_dfs[p['symbol']]) for p in CONFIG['pairs']}
     arima_models = {p['symbol']: train_arima(historical_dfs[p['symbol']]) for p in CONFIG['pairs']}
 
-    last_sync = last_save = last_sentiment = last_budget = time.time()
+    # Initialisation des timers pour les différentes actions périodiques
+    last_sync_time = time.time()
+    last_sentiment_update_time = time.time()
+    last_data_save_time = time.time()
+    last_budget_check_time = time.time()
+    last_training_time = time.time()
     initial_budget = float(sum(p['budget'] for p in CONFIG['pairs']))
     trading_history = []
     portfolio = PortfolioManager(CONFIG['pairs'], initial_budget)
