@@ -674,7 +674,7 @@ def predict_price_trend(data, symbol):
 
     model_path = os.path.join(CONFIG['model_save_path'], f"{symbol}_15min_weights.h5")
     if os.path.exists(model_path):
-        model = load_model(model_path)
+        model = load_model(model_path, compile=False)
     else:
         model = gru_models.get(f'{symbol}_15min') or create_gru_model((TREND_LOOKBACK, 5))
         train_model(model, X, y)
@@ -1087,7 +1087,7 @@ async def trading_bot():
     for pair in CONFIG['pairs']:
         model_path = os.path.join(CONFIG['model_save_path'], f"{pair['symbol']}_15min_weights.h5")
         if os.path.exists(model_path):
-            gru_models[f'{pair["symbol"]}_15min'] = load_model(model_path)
+            gru_models[f'{pair["symbol"]}_15min'] = load_model(model_path, compile=False)
         else:
             models = await optimize_models_async(historical_dfs[pair['symbol']], pair['symbol'])
             gru_models.update(models)
