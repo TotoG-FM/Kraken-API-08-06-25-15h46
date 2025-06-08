@@ -214,7 +214,7 @@ async def get_market_sentiment():
         response = await loop.run_in_executor(
             None,
             lambda: newsapi.get_everything(
-                q="(bitcoin OR ethereum OR cryptocurrency)",
+                q="(bitcoin OR ethereum OR xrp OR solana OR avax)",
                 language="en",
                 sort_by="publishedAt",
                 page_size=20,
