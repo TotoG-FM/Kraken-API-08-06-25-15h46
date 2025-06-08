@@ -199,6 +199,48 @@ async def get_symbol_filters():
         return {pair['symbol']: result for pair, result in zip(CONFIG['pairs'], results)}
 
 
+# Récupérer le sentiment du marché via NewsAPI et VADER
+async def get_market_sentiment():
+    """Retourne un score de sentiment de -1 (très négatif) à 1 (très positif)."""
+    try:
+        api_key = os.getenv('NEWSAPI_KEY')
+        if not api_key:
+            logger.warning("NEWSAPI_KEY non défini, retour d'un sentiment neutre.")
+            return 0.0
+
+        newsapi = NewsApiClient(api_key=api_key)
+
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: newsapi.get_everything(
+                q="(bitcoin OR ethereum OR cryptocurrency)",
+                language="en",
+                sort_by="publishedAt",
+                page_size=20,
+            ),
+        )
+        articles = response.get('articles', [])
+        if not articles:
+            logger.info("Aucun article reçu pour le calcul du sentiment.")
+            return 0.0
+
+        nltk.download('vader_lexicon', quiet=True)
+        sia = SentimentIntensityAnalyzer()
+        scores = [
+            sia.polarity_scores(
+                f"{article.get('title', '')} {article.get('description', '')}"
+            )['compound']
+            for article in articles
+        ]
+        sentiment = float(np.mean(scores)) if scores else 0.0
+        logger.info(f"Sentiment du marché calculé: {sentiment:.4f}")
+        return sentiment
+    except Exception as e:
+        logger.error(f"Erreur lors du calcul du sentiment de marché: {e}")
+        return 0.0
+
+
 # Charger l'historique des transactions
 def load_transaction_history(positions, average_entry_prices):
     if not os.path.exists(CONFIG['csv_file']):
