@@ -1148,12 +1148,26 @@ def predict_var(model, steps=1):
 # Modèle HMM
 def train_hmm(data):
     model = GaussianHMM(n_components=3, covariance_type="full", n_iter=100)
-    features = data[['Returns', 'Volatility', 'Momentum', 'Volume_Anomaly']].dropna().values
+    features_df = data[['Returns', 'Volatility', 'Momentum', 'Volume_Anomaly']]
+    # Supprimer colonnes constantes
+    features_df = features_df.loc[:, (features_df != features_df.iloc[0]).any()]
+    # Supprimer ou remplir les NaN
+    features_df = features_df.dropna()
+    features = features_df.values
+    if features.size == 0:
+        logger.warning("Aucune donnée valide pour entraîner le modèle HMM.")
+        return model
     model.fit(features)
     return model
 
 def predict_hmm(model, data):
-    features = data[['Returns', 'Volatility', 'Momentum', 'Volume_Anomaly']].dropna().values
+    features_df = data[['Returns', 'Volatility', 'Momentum', 'Volume_Anomaly']]
+    features_df = features_df.loc[:, (features_df != features_df.iloc[0]).any()]
+    features_df = features_df.dropna()
+    features = features_df.values
+    if features.size == 0:
+        logger.warning("Pas de données pour la prédiction HMM.")
+        return 0
     states = model.predict(features)
     return np.mean(features[states == np.bincount(states).argmax(), 0])
 
