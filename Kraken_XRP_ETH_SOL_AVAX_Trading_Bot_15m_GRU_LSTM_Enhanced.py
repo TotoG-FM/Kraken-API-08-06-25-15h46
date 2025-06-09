@@ -117,6 +117,7 @@ DEFAULT_VOLATILITY = CONFIG.get('default_volatility', 0.7)
 MIN_WEIGHT = CONFIG.get('min_weight', 0.05)
 PNL_SELL_THRESHOLD = CONFIG.get('pnl_sell_threshold', -0.10)
 TREND_LOOKBACK = CONFIG.get('trend_lookback', 60)
+RISK_FREE_RATE = CONFIG.get('risk_free_rate', 0.0)
 API_CALL_DELAY = CONFIG.get('api_call_delay', 1.0)
 MAX_RETRIES = CONFIG.get('max_retries', 10)
 RETRY_DELAY = CONFIG.get('retry_delay', 2)
@@ -156,8 +157,12 @@ if not os.path.exists(CONFIG['csv_file']):
 if not os.path.exists(CONFIG['data_log_file']):
     with open(CONFIG['data_log_file'], 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['timestamp', 'symbol', 'last_price', 'volume', 'volatility', 'success_rate', 'monthly_return',
-                         'sharpe_ratio', 'max_drawdown', 'total_budget', 'losing_trades'])
+        writer.writerow([
+            'timestamp', 'symbol', 'last_price', 'volume', 'volatility',
+            'success_rate', 'monthly_return', 'sharpe_ratio', 'max_drawdown',
+            'total_budget', 'losing_trades', 'signal', 'confidence',
+            'open_position', 'capital', 'realized_pnl', 'unrealized_pnl'
+        ])
     logger.info(f"Fichier {CONFIG['data_log_file']} créé.")
 
 # --- Gestion des positions et journal des trades ---
@@ -901,9 +906,11 @@ def backtest(data, symbol, budget, take_profit, stop_loss, rsi_oversold, price_t
 
     returns = np.diff(equity) / equity[:-1] if len(equity) > 1 else np.array([0])
     annualized_return = (equity[-1] / equity[0]) ** (8760 / len(equity)) - 1 if len(equity) > 1 else 0
-    sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(8760) if np.std(returns) else 0
-    drawdowns = (np.maximum.accumulate(equity) - equity) / np.maximum.accumulate(equity)
-    max_drawdown = np.max(drawdowns) if drawdowns.size else 0
+    volatility = np.std(returns)
+    sharpe_ratio = ((np.mean(returns) - RISK_FREE_RATE) / volatility * np.sqrt(8760)
+                    if volatility > 1e-8 else np.nan)
+    drawdowns = np.array(equity) - np.maximum.accumulate(equity)
+    max_drawdown = drawdowns.min() if drawdowns.size else 0
     success_rate = np.mean([t.get('profit', 0) > 0 for t in trades]) if trades else 0
 
     if max_drawdown > 0:
@@ -1084,7 +1091,10 @@ def check_drawdown(drawdown):
 
 
 # Générer un rapport régulier sur la progression
-def generate_progress_report(trading_history, historical_dfs):
+def generate_progress_report(trading_history, historical_dfs,
+                             portfolio_manager, positions,
+                             average_entry_prices, equity_history,
+                             signals):
     try:
         with open(CONFIG['data_log_file'], 'a', newline='') as f:
             writer = csv.writer(f)
@@ -1097,23 +1107,33 @@ def generate_progress_report(trading_history, historical_dfs):
                 volatility = df['Volatility'].iloc[-1]
                 returns = df['Returns'].dropna()
                 monthly_return = returns.tail(720).sum()
+                volatility = np.std(returns)
                 sharpe_ratio = (
-                    np.mean(returns) / (np.std(returns) if np.std(returns) else 1e-8)
-                ) * np.sqrt(8760)
-                drawdowns = (
-                    np.maximum.accumulate(df['price']) - df['price']
-                ) / np.maximum.accumulate(df['price'])
-                max_drawdown = drawdowns.max() if len(drawdowns) else 0
+                    (np.mean(returns) - RISK_FREE_RATE) / volatility * np.sqrt(8760)
+                    if volatility > 1e-8 else np.nan
+                )
+                drawdowns = df['price'] - df['price'].cummax()
+                max_drawdown = drawdowns.min() if len(drawdowns) else 0
                 success_rate = np.mean([
                     t.get('profit', 0) > 0 for t in trading_history if t['symbol'] == symbol
                 ]) if trading_history else 0
+                success_rate = float(np.clip(success_rate, 0, 1))
                 losing_trades = sum(
                     1 for t in trading_history if t['symbol'] == symbol and t.get('profit', 0) <= 0
+                )
+                signal, conf = signals.get(symbol, ("hold", 0.0))
+                open_pos = positions.get(symbol, 0.0)
+                current_capital = portfolio_manager.capital
+                realized_pnl = current_capital - portfolio_manager.initial_capital
+                unrealized_pnl = sum(
+                    (get_current_price(s) - average_entry_prices[s]) * positions[s]
+                    for s in positions
                 )
                 writer.writerow([
                     datetime.now(), symbol, last_price, volume, volatility,
                     success_rate, monthly_return, sharpe_ratio, max_drawdown,
-                    total_budget, losing_trades
+                    total_budget, losing_trades, signal, conf,
+                    open_pos, current_capital, realized_pnl, unrealized_pnl
                 ])
     except Exception as e:
         logger.error(f"Erreur génération rapport : {e}")
@@ -1246,6 +1266,8 @@ async def trading_bot():
     initial_budget = float(sum(p['budget'] for p in CONFIG['pairs']))
     trading_history = []
     portfolio = PortfolioManager(CONFIG['pairs'], initial_budget)
+    equity_history = [initial_budget]
+    signals = {}
 
     while datetime.fromtimestamp(time.time()) < END_DATE:
         try:
@@ -1304,13 +1326,14 @@ async def trading_bot():
                 trend, confidence = predict_price_trend(df, symbol)
                 should_trade = should_enter_trade(symbol, df, trend, confidence, current_price)
                 quantity = compute_position_size(pair, current_price, confidence)
-
+                signal_action = "hold"
                 if quantity > 0 and should_trade:
                     order, pos = place_buy_order(symbol, quantity, pair['quantity_precision'], current_price, positions)
                     if order:
                         update_after_buy(order, symbol, pos, current_price, positions,
                                          average_entry_prices, trading_history, portfolio_manager)
                         highest_prices[symbol] = current_price
+                        signal_action = "buy"
 
                 # Gestion de sortie
                 if positions[symbol] > 0:
@@ -1328,17 +1351,25 @@ async def trading_bot():
                             update_after_sell(order, symbol, current_price, average_entry_prices,
                                               positions, trading_history, portfolio_manager)
                             highest_prices[symbol] = 0
+                            signal_action = "sell"
+                signals[symbol] = (signal_action, float(confidence))
 
             # --- Suivi budget et drawdown ---
-            current_budget = portfolio_manager.capital + sum(
+            current_equity = portfolio_manager.capital + sum(
                 positions[s] * get_current_price(s)
                 for s in positions if get_current_price(s)
             )
-            drawdown = (current_budget - initial_budget) / initial_budget
-            check_drawdown(drawdown)
+            equity_history.append(current_equity)
+            max_equity = max(equity_history)
+            current_drawdown = current_equity - max_equity
+            check_drawdown(current_drawdown / max_equity if max_equity else 0)
+            current_budget = current_equity
 
             if current_time - last_data_save_time >= DATA_SAVE_INTERVAL:
-                generate_progress_report(trading_history, historical_dfs)
+                generate_progress_report(trading_history, historical_dfs,
+                                         portfolio_manager, positions,
+                                         average_entry_prices, equity_history,
+                                         signals)
                 last_data_save_time = current_time
 
             if current_time - last_budget_check_time >= MONTHLY_CHECK_INTERVAL:
@@ -1361,6 +1392,7 @@ class PortfolioManager:
     def __init__(self, pairs, initial_capital):
         self.pairs = pairs
         self.capital = float(initial_capital)
+        self.initial_capital = float(initial_capital)
         self.weights = {pair['symbol']: 1.0 / len(pairs) for pair in pairs}
         self.positions = {pair['symbol']: 0.0 for pair in pairs}
 
@@ -1450,6 +1482,7 @@ if __name__ == "__main__":
           min_weight: 0.05
           pnl_sell_threshold: -0.10
           trend_lookback: 60
+          risk_free_rate: 0.0
           api_call_delay: 1.0
           max_retries: 10
           retry_delay: 2
