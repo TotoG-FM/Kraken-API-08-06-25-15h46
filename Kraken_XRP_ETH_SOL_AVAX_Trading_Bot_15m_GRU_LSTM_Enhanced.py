@@ -555,14 +555,18 @@ def calculate_rsi(data, window=RSI_PERIOD):
 # Calculer les moyennes mobiles
 @jit(nopython=True)
 def calculate_moving_averages(data):
-    short = np.mean(data['price'].values[-9:])
-    long = np.mean(data['price'].values[-21:])
-    return 1 if short > long and data['price'].values[-10] <= data['price'].values[-22] else -1 if short < long and \
-                                                                                                   data['price'].values[
-                                                                                                       -10] >= \
-                                                                                                   data['price'].values[
-                                                                                                       -22] else 0
-
+    prices = data["price"].values
+    if len(prices) < 22:
+        return 0
+    short = np.mean(prices[-9:])
+    long = np.mean(prices[-21:])
+    return (
+        1
+        if short > long and prices[-10] <= prices[-22]
+        else -1
+        if short < long and prices[-10] >= prices[-22]
+        else 0
+    )
 # Calculer le MACD
 @jit(nopython=True)
 def calculate_macd(data):
@@ -629,6 +633,8 @@ def optimize_horizon(data, symbol, horizon):
             X, y = prepare_sequences(returns, volume, volatility, momentum, volume_anomaly, horizon)
             if len(X) == 0 or len(y) == 0 or np.any(np.isnan(X)) or np.any(np.isnan(y)):
                 return float('inf')
+            if X.shape[0] < 6:
+                raise optuna.exceptions.TrialPruned("Not enough examples for GRU")
 
             model.fit(X, y, epochs=epochs, batch_size=batch_size, verbose=0, validation_split=0.2)
             loss = model.evaluate(X, y, verbose=0)
@@ -722,9 +728,9 @@ def train_model(model, X, y):
 
 def save_models(models):
     for name, model in models.items():
-        path = os.path.join(CONFIG['model_save_path'], f"{name}_weights.h5")
+        path = os.path.join(CONFIG['model_save_path'], f"{name}_weights.keras")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        model.save(path)  # Sauvegarde au format .h5
+        model.save(path)
         logger.info(f"Modèle sauvegardé pour {name}")
 
 
@@ -782,9 +788,10 @@ def predict_price_trend(data, symbol):
     if not X.size or not y.size or np.any(np.isnan(X)) or np.any(np.isnan(y)):
         return 0, 0.0
 
-    model_path = os.path.join(CONFIG['model_save_path'], f"{symbol}_15min_weights.h5")
+    model_path = os.path.join(CONFIG['model_save_path'], f"{symbol}_15min_weights.keras")
     if os.path.exists(model_path):
         model = load_model(model_path, compile=False)
+        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE), loss='mse')
     else:
         model = gru_models.get(f'{symbol}_15min') or create_gru_model((TREND_LOOKBACK, 5))
         train_model(model, X, y)
@@ -1209,9 +1216,11 @@ async def trading_bot():
     # Chargement ou initialisation des modèles GRU
     gru_models = {}
     for pair in CONFIG['pairs']:
-        model_path = os.path.join(CONFIG['model_save_path'], f"{pair['symbol']}_15min_weights.h5")
+        model_path = os.path.join(CONFIG['model_save_path'], f"{pair['symbol']}_15min_weights.keras")
         if os.path.exists(model_path):
-            gru_models[f'{pair["symbol"]}_15min'] = load_model(model_path, compile=False)
+            model = load_model(model_path, compile=False)
+            model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE), loss='mse')
+            gru_models[f'{pair["symbol"]}_15min'] = model
         else:
             models = await optimize_models_async(historical_dfs[pair['symbol']], pair['symbol'])
             gru_models.update(models)
@@ -1307,8 +1316,14 @@ async def trading_bot():
                 if positions[symbol] > 0:
                     should_exit = should_exit_trade(symbol, df, current_price, average_entry_prices[symbol])
                     if should_exit:
-                        order, pos = place_sell_order(symbol, positions[symbol], pair['quantity_precision'],
-                                                      current_price, positions)
+                        order, pos = place_sell_order(
+                            symbol,
+                            positions[symbol],
+                            pair['quantity_precision'],
+                            current_price,
+                            positions,
+                            average_entry_prices[symbol],
+                        )
                         if order:
                             update_after_sell(order, symbol, current_price, average_entry_prices,
                                               positions, trading_history, portfolio_manager)
