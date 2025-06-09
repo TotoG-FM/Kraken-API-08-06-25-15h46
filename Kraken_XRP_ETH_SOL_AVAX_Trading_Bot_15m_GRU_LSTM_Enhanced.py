@@ -368,7 +368,7 @@ def load_transaction_history(positions, average_entry_prices):
                     action = row['action']
                     quantity = float(row['quantity'])
                     price = float(row['price'])
-                    profit = float(row['profit']) if row['profit'] else 0.0
+                    profit = float(row.get('profit', 0) or 0.0)
                     if action == 'buy':
                         current_qty = positions[symbol]
                         current_price = average_entry_prices[symbol]
