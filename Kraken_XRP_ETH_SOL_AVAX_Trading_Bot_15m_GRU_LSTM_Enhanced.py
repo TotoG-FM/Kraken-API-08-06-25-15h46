@@ -45,7 +45,7 @@ import importlib
 # Charger les variables d’environnement et initialiser le client Kraken
 load_dotenv()
 client = krakenex.API()
-client.load_key('.env')  # ⚠️ Assure-toi que le fichier `kraken.key` existe ou adapte selon ton usage
+client.load_key('.env') 
 
 # Activer XLA pour accélérer les calculs
 tf.config.optimizer.set_jit(True)
@@ -89,9 +89,9 @@ CONFIG = config.get('trading', {})
 MODEL_CONFIG = config.get('model', {})
 
 # Paramètres globaux (fusion avec config.yaml)
-HISTORICAL_PERIODS = CONFIG.get('historical_periods', 30000)  # ≈208 jours
-BACKTEST_PERIODS = CONFIG.get('backtest_periods', 30000)  # ≈1 an
-WINDOW_SIZE = CONFIG.get('window_size', 500)  # ≈5 jours pour prédictions live
+HISTORICAL_PERIODS = CONFIG.get('historical_periods', 30000)  # c. 208 jours
+BACKTEST_PERIODS = CONFIG.get('backtest_periods', 30000)  # c. 1 an
+WINDOW_SIZE = CONFIG.get('window_size', 500)  # c. 5 jours pour prédictions live
 TRADING_FEE = CONFIG.get('trading_fee', 0.0016)
 SLIPPAGE_RATE = CONFIG.get('slippage_rate', 0.001)  # 0.1% de slippage par défaut
 T = 1 / 8760
